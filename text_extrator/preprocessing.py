@@ -3,6 +3,7 @@ import re, base64, binascii, math
 from dataclasses import dataclass
 from typing import List, Optional
 from .datatypes import Document, Sentence
+from collections import Counter
 
 
 RE_BASE64  = re.compile(r'^[A-Za-z0-9+/]{20,}={0,2}$')   # chuỗi dài kiểu base64
