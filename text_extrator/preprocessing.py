@@ -1,8 +1,66 @@
 from __future__ import annotations
-import re
+import re, base64, binascii, math
 from dataclasses import dataclass
 from typing import List, Optional
 from .datatypes import Document, Sentence
+
+
+RE_BASE64  = re.compile(r'^[A-Za-z0-9+/]{20,}={0,2}$')   # chuỗi dài kiểu base64
+RE_HEX     = re.compile(r'^[0-9a-fA-F]{16,}$')           # hex dài (hash)
+RE_UUID    = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$')
+RE_URL     = re.compile(r'^(?:https?|ftp)://', re.I)
+
+# 2) Entropy (bit/ký tự); chuỗi quá “ngẫu nhiên” thường là rác
+def shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum((c/n) * math.log2(c/n) for c in counts.values())
+
+# 3) Thử decode base64 và kiểm tra có phải dữ liệu nhị phân (nhiều byte không in được)
+def looks_like_binary_after_b64(s: str) -> bool:
+    # base64 phải có độ dài bội số 4 mới "sạch"; nhưng nhiều chuỗi thiếu padding
+    if len(s) < 20 or len(s) % 4 != 0:
+        return False
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    if not raw:
+        return False
+    # Nếu >30% byte là không in được (ngoài \t\n\r) → khả năng cao là nhị phân
+    nonprint = sum(1 for b in raw if b < 32 and b not in (9,10,13)) + sum(1 for b in raw if b == 127)
+    return (nonprint / len(raw)) > 0.30
+
+# 4) Quy tắc quyết định "noise"
+def is_noise_token(tok: str) -> bool:
+    if not tok:
+        return True
+
+    # Bỏ qua URL, email, @mention… tuỳ nhu cầu
+    if RE_URL.search(tok):
+        return False  # có thể giữ lại URL; đổi thành True nếu bạn muốn lọc
+
+    # Loại base64/hex/uuid/hash dài
+    if RE_UUID.match(tok):
+        return True
+    if RE_HEX.match(tok) and len(tok) >= 24:  # hex dài như SHA1/256…
+        return True
+    if RE_BASE64.match(tok) or looks_like_binary_after_b64(tok):
+        return True
+
+    # Loại chuỗi quá dài mà không có nguyên âm (tiếng Anh/VN) → có thể là rác
+    vowels = set("aeiouyAEIOUYàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹ")
+    if len(tok) >= 20 and not any(ch in vowels for ch in tok):
+        return True
+
+    # Loại chuỗi có tỉ lệ chữ+số quá cao và entropy cao → giống random
+    letters_digits = sum(ch.isalnum() for ch in tok)
+    if len(tok) >= 16 and letters_digits / len(tok) > 0.95 and shannon_entropy(tok) > 4.0:
+        return True
+
+    return False
 
 _WORD_RE = re.compile(r"""[A-Za-z0-9_]+(?:'[A-Za-z0-9_]+)?""")  # simple token rule
 
@@ -46,6 +104,7 @@ def tokenize(text: str, cfg: PreprocessConfig) -> List[str]:
     if cfg.lowercase:
         text = text.lower()
     toks = [m.group(0) for m in _WORD_RE.finditer(text)]
+    toks = [t for t in toks if not is_noise_token(t)]
     if cfg.remove_stopwords:
         toks = [t for t in toks if t not in STOPWORDS]
     if cfg.stemming:
